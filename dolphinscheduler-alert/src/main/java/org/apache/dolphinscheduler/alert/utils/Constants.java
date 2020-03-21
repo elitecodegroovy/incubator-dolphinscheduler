@@ -135,8 +135,6 @@ public class Constants {
 
     public static final String TH_END = "</th>";
 
-    public static final int ALERT_SCAN_INTERVAL = 5000;
-
     public static final String MARKDOWN_QUOTE = ">";
 
     public static final String MARKDOWN_ENTER = "\n";
@@ -158,4 +156,8 @@ public class Constants {
     public static final String ENTERPRISE_WECHAT_AGENT_ID = "enterprise.wechat.agent.id";
 
     public static final String ENTERPRISE_WECHAT_USERS = "enterprise.wechat.users";
+
+    public static final String ZOOKEEPER_QUORUM = "zookeeper.quorum";
+
+    public static final String SCAN_TIME = "scan.internal.time";
 }

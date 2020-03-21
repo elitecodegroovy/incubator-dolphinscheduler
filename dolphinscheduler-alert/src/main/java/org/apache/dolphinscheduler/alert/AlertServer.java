@@ -18,6 +18,9 @@ package org.apache.dolphinscheduler.alert;
 
 import org.apache.dolphinscheduler.alert.runner.AlertSender;
 import org.apache.dolphinscheduler.alert.utils.Constants;
+import org.apache.dolphinscheduler.alert.utils.PropertyUtils;
+import org.apache.dolphinscheduler.alert.zookeeper.AbstractLock;
+import org.apache.dolphinscheduler.alert.zookeeper.ZookeeperDistributedLock;
 import org.apache.dolphinscheduler.common.thread.Stopper;
 import org.apache.dolphinscheduler.dao.AlertDao;
 import org.apache.dolphinscheduler.dao.DaoFactory;
@@ -25,7 +28,7 @@ import org.apache.dolphinscheduler.dao.entity.Alert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
+import java.util.*;
 
 /**
  * alert of start
@@ -41,6 +44,8 @@ public class AlertServer {
 
     private static AlertServer instance;
 
+    AbstractLock abstractLock;
+
     public AlertServer() {
 
     }
@@ -48,25 +53,33 @@ public class AlertServer {
     public synchronized static AlertServer getInstance(){
         if (null == instance) {
             instance = new AlertServer();
+
         }
         return instance;
     }
 
     public void start(){
         logger.info("alert server ready start ");
+        abstractLock = new ZookeeperDistributedLock();
+
         while (Stopper.isRunning()){
+            //waiting [0, 9] s
+            int randomWaitingTime = (new Random(System.currentTimeMillis()).nextInt(10)) * 1000;
             try {
-                Thread.sleep(Constants.ALERT_SCAN_INTERVAL);
+                Thread.sleep(randomWaitingTime);
             } catch (InterruptedException e) {
                 logger.error(e.getMessage(),e);
                 Thread.currentThread().interrupt();
             }
             List<Alert> alerts = alertDao.listWaitExecutionAlert();
-            alertSender = new AlertSender(alerts, alertDao);
+            if (alerts == null || alerts.size() == 0) {
+                logger.info("The tasks of alert server is 0.");
+                continue;
+            }
+            alertSender = new AlertSender(alerts, alertDao, abstractLock);
             alertSender.run();
         }
     }
-
 
     public static void main(String[] args){
         AlertServer alertServer = AlertServer.getInstance();

@@ -63,6 +63,10 @@ public class AlertDao extends AbstractBaseDao {
         return alertMapper.insert(alert);
     }
 
+    public Alert queryById(int id) {
+        return alertMapper.selectById(id);
+    }
+
     /**
      * update alert
      * @param alertStatus alertStatus

@@ -20,6 +20,7 @@ import org.apache.dolphinscheduler.alert.manager.EmailManager;
 import org.apache.dolphinscheduler.alert.manager.EnterpriseWeChatManager;
 import org.apache.dolphinscheduler.alert.utils.Constants;
 import org.apache.dolphinscheduler.alert.utils.EnterpriseWeChatUtils;
+import org.apache.dolphinscheduler.alert.zookeeper.AbstractLock;
 import org.apache.dolphinscheduler.common.enums.AlertStatus;
 import org.apache.dolphinscheduler.common.enums.AlertType;
 import org.apache.dolphinscheduler.common.utils.CollectionUtils;
@@ -48,94 +49,122 @@ public class AlertSender{
 
     private List<Alert> alertList;
     private AlertDao alertDao;
+    private AbstractLock zkLocker;
 
     public AlertSender(){}
-    public AlertSender(List<Alert> alertList, AlertDao alertDao){
+
+    public AlertSender(List<Alert> alertList, AlertDao alertDao, AbstractLock abstractLock) {
         super();
         this.alertList = alertList;
         this.alertDao = alertDao;
+        this.zkLocker = abstractLock;
     }
 
+    /**
+     * Using distributed lock for sending mail or SMS.
+     */
     public void run() {
-
-        List<User> users;
-
-        Map<String, Object> retMaps = null;
         for(Alert alert:alertList){
-            users = alertDao.listUserByAlertgroupId(alert.getAlertGroupId());
-
-            // receiving group list
-            List<String> receviersList = new ArrayList<>();
-            for(User user:users){
-                receviersList.add(user.getEmail());
-            }
-            // custom receiver
-            String receivers = alert.getReceivers();
-            if (StringUtils.isNotEmpty(receivers)){
-                String[] splits = receivers.split(",");
-                receviersList.addAll(Arrays.asList(splits));
-            }
-
-            // copy list
-            List<String> receviersCcList = new ArrayList<>();
-
-
-            // Custom Copier
-            String receiversCc = alert.getReceiversCc();
-
-            if (StringUtils.isNotEmpty(receiversCc)){
-                String[] splits = receiversCc.split(",");
-                receviersCcList.addAll(Arrays.asList(splits));
-            }
-
-            if (CollectionUtils.isEmpty(receviersList) && CollectionUtils.isEmpty(receviersCcList)) {
-                logger.warn("alert send error : At least one receiver address required");
-                alertDao.updateAlert(AlertStatus.EXECUTION_FAILURE, "execution failure,At least one receiver address required.", alert.getId());
-                continue;
-            }
-
-            if (alert.getAlertType() == AlertType.EMAIL){
-                retMaps = emailManager.send(receviersList,receviersCcList, alert.getTitle(), alert.getContent(),alert.getShowType());
-
-                alert.setInfo(retMaps);
-            }else if (alert.getAlertType() == AlertType.SMS){
-                retMaps = emailManager.send(getReciversForSMS(users), alert.getTitle(), alert.getContent(),alert.getShowType());
-                alert.setInfo(retMaps);
-            } else {
-                logger.error("AlertType is not defined. code: {}, descp: {}", 
-                    alert.getAlertType().getCode(), 
-                    alert.getAlertType().getDescp());
-                return;
-            }
-
-            //send flag
-            boolean flag = false;
-
-            if (null != retMaps) {
-                flag = Boolean.parseBoolean(String.valueOf(retMaps.get(Constants.STATUS)));
-            }
-
-            if (flag) {
-                alertDao.updateAlert(AlertStatus.EXECUTION_SUCCESS, "execution success", alert.getId());
-                logger.info("alert send success");
-                if (EnterpriseWeChatUtils.isEnable()) {
-                    logger.info("Enterprise WeChat is enable!");
-                    try {
-                        String token = EnterpriseWeChatUtils.getToken();
-                        weChatManager.send(alert, token);
-                    } catch (Exception e) {
-                        logger.error(e.getMessage(), e);
+            String suffixPath = String.valueOf(alert.getId());
+            if (getLock(suffixPath)) {
+                try {
+                    Alert dbAlert = alertDao.queryById(alert.getId());
+                    if (dbAlert.getAlertStatus().getCode() == AlertStatus.WAIT_EXECUTION.getCode()) {
+                        doTask(alert);
                     }
+                } catch (Exception e) {
+                    logger.error(e.getMessage(), e);
+                    zkLocker.releaseLock(suffixPath);
+                } finally {
+                    zkLocker.releaseLock(suffixPath);
                 }
 
-            } else {
-                if (null != retMaps) {
-                    alertDao.updateAlert(AlertStatus.EXECUTION_FAILURE, String.valueOf(retMaps.get(Constants.MESSAGE)), alert.getId());
-                    logger.info("alert send error : {}", retMaps.get(Constants.MESSAGE));
-                }
             }
         }
+    }
 
+    private boolean getLock(String suffixPath) {
+        try {
+            return zkLocker.getLockWithoutWaiting(suffixPath);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public void doTask(Alert alert) {
+        Map<String, Object> retMaps;
+        List<User> users = alertDao.listUserByAlertgroupId(alert.getAlertGroupId());
+
+        // receiving group list
+        List<String> receviersList = new ArrayList<>();
+        for (User user : users) {
+            receviersList.add(user.getEmail());
+        }
+        // custom receiver
+        String receivers = alert.getReceivers();
+        if (StringUtils.isNotEmpty(receivers)) {
+            String[] splits = receivers.split(",");
+            receviersList.addAll(Arrays.asList(splits));
+        }
+
+        // copy list
+        List<String> receviersCcList = new ArrayList<>();
+
+
+        // Custom Copier
+        String receiversCc = alert.getReceiversCc();
+
+        if (StringUtils.isNotEmpty(receiversCc)) {
+            String[] splits = receiversCc.split(",");
+            receviersCcList.addAll(Arrays.asList(splits));
+        }
+
+        if (CollectionUtils.isEmpty(receviersList) && CollectionUtils.isEmpty(receviersCcList)) {
+            logger.warn("alert send error : At least one receiver address required");
+            alertDao.updateAlert(AlertStatus.EXECUTION_FAILURE, "execution failure,At least one receiver address required.", alert.getId());
+            return;
+        }
+
+        if (alert.getAlertType() == AlertType.EMAIL) {
+            retMaps = emailManager.send(receviersList, receviersCcList, alert.getTitle(), alert.getContent(), alert.getShowType());
+
+            alert.setInfo(retMaps);
+        } else if (alert.getAlertType() == AlertType.SMS) {
+            retMaps = emailManager.send(getReciversForSMS(users), alert.getTitle(), alert.getContent(), alert.getShowType());
+            alert.setInfo(retMaps);
+        } else {
+            logger.error("AlertType is not defined. code: {}, descp: {}",
+                    alert.getAlertType().getCode(),
+                    alert.getAlertType().getDescp());
+            return;
+        }
+
+        //send flag
+        boolean flag = false;
+
+        if (null != retMaps) {
+            flag = Boolean.parseBoolean(String.valueOf(retMaps.get(Constants.STATUS)));
+        }
+
+        if (flag) {
+            alertDao.updateAlert(AlertStatus.EXECUTION_SUCCESS, "execution success", alert.getId());
+            logger.info("alert send success");
+            if (EnterpriseWeChatUtils.isEnable()) {
+                logger.info("Enterprise WeChat is enable!");
+                try {
+                    String token = EnterpriseWeChatUtils.getToken();
+                    weChatManager.send(alert, token);
+                } catch (Exception e) {
+                    logger.error(e.getMessage(), e);
+                }
+            }
+
+        } else {
+            if (null != retMaps) {
+                alertDao.updateAlert(AlertStatus.EXECUTION_FAILURE, String.valueOf(retMaps.get(Constants.MESSAGE)), alert.getId());
+                logger.info("alert send error : {}", retMaps.get(Constants.MESSAGE));
+            }
+        }
     }
 
 
